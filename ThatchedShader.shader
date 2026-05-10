@@ -108,7 +108,6 @@ Shader "Custom/TestShader"
             TEXTURE2D(_NoiseMap);
             SAMPLER(sampler_NoiseMap);
 
-            // [수정된 부분] 커스텀 상수 버퍼만 정의합니다.
             CBUFFER_START(CustomFurProps) 
                 float _LayerCount; 
                 float _MaxDepth;
@@ -155,26 +154,21 @@ Shader "Custom/TestShader"
 
                 for (int layer = 0; layer < layerCount; ++layer)
                 {
-                    // 1. 현재 층의 팽창 깊이 계산
-                    // layer가 0부터 시작하므로 +1을 해주고, 총 깊이에서 현재 층이 차지하는 비율을 구합니다.
+                    // 현재 층의 팽창 깊이 계산
                     float depthFactor = (layer + 1.0f) / layerCount;
                     float currentDepth = _MaxDepth * depthFactor;
                     
-                    for (int i = 0; i < 3; i++) // 입력 삼각형의 각 정점(i=0, 1, 2)에 대해 반복
+                    for (int i = 0; i < 3; i++)
                     {
                         float4 positionOS = input[i].positionOS; // 원본 오브젝트 공간 위치
 
-                        // ----------------------------------------------------
-                        // 2. 노말 벡터 처짐 계산 (이전 논의에서 나온 로직)
-                        // ----------------------------------------------------
+                        // 노말 벡터 처짐 계산
 
                         float3 originalNormal = input[i].normal;
                         float3 worldNormal = normalWS[i];
                         float3 processedNormal = worldNormal; // 처짐이 적용될 최종 노말
 
-                        // ----------------------------------------------------
-                        // B. Y-down 60도 처짐 로직 적용 (월드 공간에서 수행)
-                        // ----------------------------------------------------
+                        // Y-down 60도 처짐 로직 적용 (월드 공간에서 수행)
                         // Y축이 양수인 면 (지붕 윗면)에만 처짐 적용
                         if (worldNormal.y > 0.0f && worldNormal.y < 0.96f) 
                         {
@@ -185,7 +179,6 @@ Shader "Custom/TestShader"
                             // 회전 축 k의 크기 제곱: k = (n_z, 0, -n_x)
                             float K_sq = nx * nx + nz * nz;
                             
-                            // 수직에 가까운 면(K_sq가 0에 가까움)은 회전 회피
                             if (K_sq > 0.0001f)
                             {
                                 float K = sqrt(K_sq);
@@ -193,7 +186,7 @@ Shader "Custom/TestShader"
                                 const float COS_60 = 0.5f;
                                 const float SIN_60 = 0.866025f; // sqrt(3) / 2
                                 
-                                // k x n 계산 (Rodrigues 공식의 두 번째 항)
+                                // k x n 계산 
                                 // k x n = (n_x n_y, -(n_x^2+n_z^2), n_y n_z)
                                 float3 k_cross_n = float3(
                                     nx * ny,
@@ -201,21 +194,14 @@ Shader "Custom/TestShader"
                                     ny * nz
                                 );
 
-                                // 로드리게스 공식 간소화 버전 (n.k = 0) 적용
                                 processedNormal = worldNormal * COS_60 + (k_cross_n / K) * SIN_60;
                                 processedNormal = normalize(processedNormal);
                             }
                             posCS[i] = TransformWorldToHClip(posWS[i]+processedNormal*currentDepth);
                         }
                         
-                        // ----------------------------------------------------
-                        // 3. 클립 공간으로 출력
-                        // ----------------------------------------------------
                         output.positionCS = posCS[i];
                         output.positionWS = posWS[i];
-                        
-                        // 팽창된 층의 노말은 처짐이 적용된 노말을 사용해야 조명이 자연스럽습니다.
-                        // 하지만 현재는 간단하게 원본 노말을 전달하여 색상 확인용으로 사용합니다.
                         output.normalWS = normalWS[i]; 
                         
                         output.uv = TRANSFORM_TEX(input[i].uv, _BaseMap);
@@ -253,8 +239,8 @@ Shader "Custom/TestShader"
                 //InitializeStandardLitSurfaceData(IN.uv.xy, surfaceData);
                 surfaceData.albedo =  baseColor;
                 surfaceData.occlusion = occlusion;
-                surfaceData.metallic = _Metallic; // 초가집이므로 0
-                surfaceData.smoothness = _Smoothness; // 거친 재질이므로 0
+                surfaceData.metallic = _Metallic; 
+                surfaceData.smoothness = _Smoothness;
 
                 InputData inputData = (InputData) 0 ;
                 inputData.positionWS = IN.positionWS;
