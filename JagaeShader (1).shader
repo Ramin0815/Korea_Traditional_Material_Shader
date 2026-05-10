@@ -79,19 +79,19 @@ Properties
 
             float3 Iridescence(float NdotV, float thickness, float IOR)
             {
-                // 박막 간섭을 시뮬레이션하기 위한 광 경로차(Optical Path Difference) 기반 모델입니다.
-                // NdotV가 1에 가까울수록 (정면) OPD가 작아지고, 0에 가까울수록 커집니다.
+                // 박막 간섭을 시뮬레이션하기 위한 광 경로차 기반 모델
+                // NdotV가 1에 가까울수록 OPD가 작아짐
                 float OPD = thickness * IOR * (1.0 - NdotV); 
                 
-                // 파장에 따른 색상 변화를 위한 3개의 위상차를 설정합니다.
-                // 이 값들은 RGB 파장에 맞게 조절된 임의의 주파수입니다.
+                // 파장에 따른 색상 변화를 위한 3개의 위상차를 설정
+                // 이 값들은 RGB 파장에 맞게 조절된 임의의 주파수
                 const float3 Wavelengths = float3(680.0, 550.0, 470.0); // R, G, B 파장 근사치 (nm)
                 const float PI2 = 6.283185; 
                 
                 // 파장에 따른 위상차 계산: 2 * PI * (OPD / lambda)
                 float3 phase = OPD / Wavelengths; 
                 
-                // 코사인 함수를 이용해 간섭 파형을 시뮬레이션 (간섭의 강도를 나타냄)
+                // 코사인 함수를 이용해 간섭 파형을 시뮬레이션
                 float3 interference =  0.5 + 0.5 * cos(phase * PI2);
                 
                 // 색상 왜곡 방지
@@ -139,8 +139,6 @@ Properties
                 // 박막 간섭 색상 계산
                 float3 iridescenceColor = Iridescence(NdotV2, thickness, _IridescenceIOR);
 
-                // Specular Color 통합: Specular Color를 Iridescence Color로 덮어쓰거나 섞어줍니다.
-                // _SPECULAR_COLOR_SPECULAR_COLOR 정의를 사용하므로, Specular Color에 통합합니다.
                 surfaceData.specular = lerp(float3(1, 1, 1), half3(iridescenceColor), _IridescenceStrength);
                 //surfaceData.specular = _Specular.xyz;
 
