@@ -2,20 +2,12 @@ Shader "URP/Unlit/Gat"
 {
     Properties
     {
-        _BaseColor      ("Base Color", Color) = (0,0,0,1)
-        _ThreadColor    ("Thread Color", Color) = (0.15,0.15,0.15,1)
-
-        _Density        ("Thread Density", Float) = 80.0
-        _Thickness      ("Thread Thickness", Range(0.1, 0.5)) = 0.01
-
-        _NoiseScale     ("Noise Scale", Float) = 15.0
-        _NoiseStrength  ("Noise Strength", Range(0.0, 0.1)) = 0.02
-
-        _BumpStrength   ("Bump Strength", Range(0.0, 2.0)) = 0.5
-
-        _FakeLightDir   ("Fake Light Direction", Vector) = (0.01, 0.0, 0.0, 0.0)
-
-        _EdgeColor      ("Edge Color", Color) = (1,0,0,1)
+        _InnerDiameterMM ("Inner Diameter (mm)", Float) = 100.0
+        _ObjectUnitsToMillimeters ("World Units To Millimeters", Float) = 1000.0
+        [IntRange] _Density ("Weave Density", Range(2, 2048)) = 512
+        _Thickness ("Thread Thickness (mm)", Range(0.001, 0.25)) = 0.05
+        _RimHeightMM ("Rim Height (mm)", Range(0, 20)) = 2.0
+        [HideInInspector] _GatLocalYBounds ("Gat Local Y Bounds", Vector) = (-1.0, 1.0, 0.0, 0.0)
     }
 
     SubShader
@@ -26,7 +18,8 @@ Shader "URP/Unlit/Gat"
             "Queue"="Transparent"
             "RenderPipeline"="UniversalPipeline"
         }
-        // PASS 1 : 망사 패턴
+
+        // PASS 1: flat black cap and cylindrical-side thread pattern.
         Pass
         {
             Name "ForwardUnlit"
@@ -37,225 +30,213 @@ Shader "URP/Unlit/Gat"
             Cull Off
 
             HLSLPROGRAM
+            #pragma target 3.5
             #pragma vertex vert
             #pragma fragment frag
             #pragma multi_compile_fog
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            float4 _BaseColor;
-            float4 _ThreadColor;
-
-            float  _Density;
-            float  _Thickness;
-
-            float  _NoiseScale;
-            float  _NoiseStrength;
-
-            float  _BumpStrength;
-
-            float4 _FakeLightDir;
-
-            float4 _EdgeColor;
+            float _InnerDiameterMM;
+            float _ObjectUnitsToMillimeters;
+            float _Density;
+            float _Thickness;
+            float _RimHeightMM;
+            float4 _GatLocalYBounds;
 
             struct Attributes
             {
                 float4 positionOS : POSITION;
                 float3 normalOS   : NORMAL;
-                float2 uv         : TEXCOORD0;
             };
 
             struct Varyings
             {
-                float4 positionHCS : SV_POSITION;
-                float2 uv          : TEXCOORD0;
-                float  fogFactor   : TEXCOORD1;
-
-                float3 normalWS    : TEXCOORD2;
-                float3 viewDirWS   : TEXCOORD3;
+                float4 positionHCS  : SV_POSITION;
+                float3 positionOS   : TEXCOORD0;
+                float3 normalOS     : TEXCOORD1;
+                float  fogFactor    : TEXCOORD2;
             };
 
-            float hash21(float2 p)
+            static const float GAT_TWO_PI = 6.28318530718;
+            static const float GAT_RADIAL_CORE_RADIUS_MM = 0.001;
+            static const float GAT_CAP_NORMAL_Y_THRESHOLD = 0.5;
+
+            // Antiderivative of a unit-period box centered at 0.5.
+            float PeriodicBoxIntegral(float x, float halfWidth)
             {
-                p = frac(p * float2(123.34, 345.45));
-                p += dot(p, p + 34.345);
-                return frac(p.x * p.y);
+                float width = 2.0 * halfWidth;
+                return floor(x) * width
+                     + clamp(frac(x) - (0.5 - halfWidth), 0.0, width);
             }
 
-            float ThreadStripe(float coord, float density, float thickness, float noiseOffset)
+            // Analytic box-filtered coverage for a periodic stripe train.
+            float PeriodicStripeCoverage(float centerCoord, float halfWidth, float footprint)
             {
-                float x = coord * density + noiseOffset;
-                x = frac(x);
+                halfWidth = clamp(halfWidth, 0.0, 0.5);
+                footprint = max(abs(footprint), 1e-5);
 
-                float d = abs(x - 0.5);
-                float edge = thickness;
+                // Integer shifts do not change the pattern. Reducing the coordinate avoids
+                // subtracting large antiderivative values on distant rings.
+                float center = frac(centerCoord);
+                float lo = center - 0.5 * footprint;
+                float hi = center + 0.5 * footprint;
+                float coverage = (PeriodicBoxIntegral(hi, halfWidth)
+                                - PeriodicBoxIntegral(lo, halfWidth)) / footprint;
+                return saturate(coverage);
+            }
 
-                float stripeVal = 1.0 - smoothstep(thickness, thickness + edge, d);
-                return stripeVal;
+            float EvenRadialCount(float requestedCount)
+            {
+                float count = clamp(abs(requestedCount), 2.0, 2048.0);
+                return clamp(floor(count * 0.5 + 0.5) * 2.0, 2.0, 2048.0);
+            }
+
+            // Logarithmic outside a tiny fixed core, with a continuous linear
+            // extension inside it. The fixed core prevents the mapping from becoming
+            // singular at the pole without making ring positions depend on thickness.
+            float RadialWeaveCoordinate(
+                float radiusMM,
+                float innerRadiusMM,
+                float coordinateScale)
+            {
+                float safeRadiusMM = max(radiusMM, GAT_RADIAL_CORE_RADIUS_MM);
+                float safeInnerRadiusMM = max(innerRadiusMM, GAT_RADIAL_CORE_RADIUS_MM);
+                float linearExtension = (min(radiusMM, GAT_RADIAL_CORE_RADIUS_MM)
+                                       - min(innerRadiusMM, GAT_RADIAL_CORE_RADIUS_MM))
+                                      / GAT_RADIAL_CORE_RADIUS_MM;
+                return coordinateScale
+                     * (log(safeRadiusMM / safeInnerRadiusMM)
+                      + linearExtension);
             }
 
             Varyings vert(Attributes IN)
             {
                 Varyings OUT;
-
-                float3 positionWS = TransformObjectToWorld(IN.positionOS.xyz);
-                OUT.positionHCS = TransformWorldToHClip(positionWS);
-
-                OUT.normalWS  = TransformObjectToWorldNormal(IN.normalOS);
-                OUT.viewDirWS = GetWorldSpaceViewDir(positionWS);
-
-                OUT.uv = IN.uv;
+                OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
+                OUT.positionOS = IN.positionOS.xyz;
+                OUT.normalOS = IN.normalOS;
                 OUT.fogFactor = ComputeFogFactor(OUT.positionHCS.z);
-
                 return OUT;
             }
 
             half4 frag(Varyings IN) : SV_Target
             {
-                float2 uv = IN.uv;
+                float millimetersPerWorldUnit = max(abs(_ObjectUnitsToMillimeters), 1e-4);
+                float4x4 objectToWorld = GetObjectToWorldMatrix();
+                float xMillimetersPerObjectUnit = length(float3(
+                    objectToWorld._m00, objectToWorld._m10, objectToWorld._m20))
+                    * millimetersPerWorldUnit;
+                float yMillimetersPerObjectUnit = length(float3(
+                    objectToWorld._m01, objectToWorld._m11, objectToWorld._m21))
+                    * millimetersPerWorldUnit;
+                float zMillimetersPerObjectUnit = length(float3(
+                    objectToWorld._m02, objectToWorld._m12, objectToWorld._m22))
+                    * millimetersPerWorldUnit;
+                float2 planarMM = IN.positionOS.xz
+                                * float2(xMillimetersPerObjectUnit,
+                                         zMillimetersPerObjectUnit);
+                float2 dxMM = ddx(planarMM);
+                float2 dyMM = ddy(planarMM);
+                float yMM = IN.positionOS.y * yMillimetersPerObjectUnit;
+                float radiusMM = length(planarMM);
+                float radiusSquared = dot(planarMM, planarMM);
+                float innerRadiusMM = 0.5 * max(_InnerDiameterMM, 0.0);
+                float radialCount = EvenRadialCount(_Density);
+                float fullWidthMM = clamp(_Thickness, 0.001, 0.25);
+                float coordinateScale = radialCount / GAT_TWO_PI;
 
-                // 엮인 패턴 구현
-                float n = hash21(uv * _NoiseScale);
-                float noiseOffset = (n - 0.5) * _NoiseStrength;
+                float safeRadius = max(radiusMM, 1e-5);
+                float2 radialGradient = planarMM / safeRadius;
+                float ringCoord = RadialWeaveCoordinate(
+                    radiusMM, innerRadiusMM, coordinateScale);
+                float radialCoordinateDerivative = coordinateScale
+                                                 / max(radiusMM, GAT_RADIAL_CORE_RADIUS_MM);
+                float ringFootprint = (abs(dot(radialGradient, dxMM))
+                                     + abs(dot(radialGradient, dyMM)))
+                                    * radialCoordinateDerivative;
+                if (radiusSquared <= 1e-8)
+                    ringFootprint = (length(dxMM) + length(dyMM))
+                                  * radialCoordinateDerivative;
 
-                float verticalThread   = ThreadStripe(uv.x, _Density, _Thickness,  noiseOffset);
-                float horizontalThread = ThreadStripe(uv.y, _Density, _Thickness, -noiseOffset);
+                // Locally linearize the radial mapping so _Thickness remains a
+                // physical full width in millimeters as logarithmic spacing expands.
+                float ringHalfWidth = 0.5 * fullWidthMM
+                                    * radialCoordinateDerivative;
 
-                float weave = saturate(max(verticalThread, horizontalThread));
+                float angle = radiusSquared > 1e-8 ? atan2(planarMM.y, planarMM.x) : 0.0;
+                float spokeCoord = angle * coordinateScale;
 
-                float3 baseCol   = _BaseColor.rgb;
-                float3 threadCol = _ThreadColor.rgb;
-                float3 albedo = lerp(baseCol, threadCol, weave);
+                // The angular half-width is derived from perpendicular distance to a
+                // straight radial thread, so both thread families have the same width in mm.
+                float spokeHalfAngle = asin(saturate((0.5 * fullWidthMM) / safeRadius));
+                float spokeHalfWidth = min(spokeHalfAngle * coordinateScale, 0.5);
 
-                // Bump 구현
-                float grad = weave;
-                float dx = ddx(grad);
-                float dy = ddy(grad);
+                // Differentiate atan analytically in XZ to remain continuous at +/-pi.
+                float2 angularGradient = float2(-planarMM.y, planarMM.x)
+                                       / max(radiusSquared, 1e-8);
+                float spokeFootprint = (abs(dot(angularGradient, dxMM))
+                                      + abs(dot(angularGradient, dyMM)))
+                                     * coordinateScale;
+                if (radiusSquared <= 1e-8)
+                    spokeFootprint = radialCount;
 
-                float3 N = normalize(float3(-dx * _BumpStrength,
-                                            -dy * _BumpStrength,
-                                             1.0));
+                // +0.5 converts integer-centered line coordinates to the helper's
+                // half-integer-centered box convention.
+                float ring = PeriodicStripeCoverage(
+                    ringCoord + 0.5, ringHalfWidth, ringFootprint);
+                float spoke = PeriodicStripeCoverage(
+                    spokeCoord + 0.5, spokeHalfWidth, spokeFootprint);
+                float capAlpha = saturate(ring + spoke - ring * spoke);
 
-                float3 L = normalize(_FakeLightDir.xyz); 
-                float diff = saturate(dot(N, L)); 
+                // A side is parameterized by angle and distance from the mesh's
+                // bottom bound. Its vertical and horizontal thread pitches both
+                // approximate the local circumference divided by N.
+                float sidePitchMM = max(GAT_TWO_PI * safeRadius / radialCount, 1e-5);
+                float sideVerticalCoord = spokeCoord;
+                float sideVerticalHalfWidth = spokeHalfWidth;
+                float sideVerticalFootprint = spokeFootprint;
+                float localYMin = min(_GatLocalYBounds.x, _GatLocalYBounds.y);
+                float localYMax = max(_GatLocalYBounds.x, _GatLocalYBounds.y);
+                float yFromBottomMM = yMM - localYMin * yMillimetersPerObjectUnit;
+                float yToTopMM = localYMax * yMillimetersPerObjectUnit - yMM;
+                float sideHorizontalCoord = yFromBottomMM / sidePitchMM;
+                float sideHorizontalHalfWidth = min(0.5 * fullWidthMM / sidePitchMM, 0.5);
+                float sideHorizontalFootprint = abs(ddx(sideHorizontalCoord))
+                                              + abs(ddy(sideHorizontalCoord));
+                float sideVertical = PeriodicStripeCoverage(
+                    sideVerticalCoord + 0.5,
+                    sideVerticalHalfWidth,
+                    sideVerticalFootprint);
+                float sideHorizontal = PeriodicStripeCoverage(
+                    sideHorizontalCoord + 0.5,
+                    sideHorizontalHalfWidth,
+                    sideHorizontalFootprint);
+                float sideAlpha = saturate(sideVertical + sideHorizontal
+                                          - sideVertical * sideHorizontal);
 
-                float lighting = 0.3 + 0.7 * diff; 
+                float rimHeightMM = max(_RimHeightMM, 0.0);
+                float totalHeightMM = max(yFromBottomMM + yToTopMM, 0.0);
+                float rimMask = max(step(yFromBottomMM, rimHeightMM),
+                                    step(yToTopMM, rimHeightMM));
+                rimMask = max(rimMask, step(totalHeightMM, 2.0 * rimHeightMM));
+                sideAlpha = max(sideAlpha, rimMask);
 
-                float3 finalColor = albedo * lighting;
+                float capMask = step(GAT_CAP_NORMAL_Y_THRESHOLD,
+                                     abs(normalize(IN.normalOS).y));
+                float alpha = lerp(sideAlpha, capAlpha, capMask);
 
-                finalColor = MixFog(finalColor, IN.fogFactor);
+                // Keep derivatives above the discard. The mesh itself supplies the outer bound.
+                // The opening is only cut from upward/downward-facing cap triangles.
+                clip(lerp(1.0, radiusMM - innerRadiusMM, capMask));
+                clip(alpha - 0.0001);
 
-                float alpha = weave;
+                float3 finalColor = MixFog(float3(0.0, 0.0, 0.0), IN.fogFactor);
                 return half4(finalColor, alpha);
             }
 
             ENDHLSL
         }
-        // PASS 2 : Geometry Shader - Edge Detection
-        Pass
-        {
-            Name "HardEdge_GS"
-            Tags { "LightMode"="UniversalForward" }
 
-            Blend SrcAlpha OneMinusSrcAlpha
-            ZWrite Off
-            ZTest LEqual
-            Cull Off
-
-            HLSLPROGRAM
-            #pragma target 4.5
-            #pragma vertex vert_edge
-            #pragma geometry geom_edge
-            #pragma fragment frag_edge
-
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
-            float4 _EdgeColor;
-
-            struct AttributesEdge
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS   : NORMAL;
-            };
-
-            struct VaryingsEdge
-            {
-                float4 positionHCS : SV_POSITION;
-                float3 posWS       : TEXCOORD0;
-                float3 normalWS    : TEXCOORD1;
-            };
-
-            VaryingsEdge vert_edge(AttributesEdge IN)
-            {
-                VaryingsEdge OUT;
-
-                float3 posWS = TransformObjectToWorld(IN.positionOS.xyz);
-                OUT.positionHCS = TransformWorldToHClip(posWS);
-                OUT.posWS       = posWS;
-                OUT.normalWS    = TransformObjectToWorldNormal(IN.normalOS);
-
-                return OUT;
-            }
-
-            // vertex normal 기반 edge 검출
-            [maxvertexcount(6)]
-            void geom_edge(triangle VaryingsEdge IN[3], inout LineStream<VaryingsEdge> lineStream)
-            {
-                float3 n0 = normalize(IN[0].normalWS);
-                float3 n1 = normalize(IN[1].normalWS);
-                float3 n2 = normalize(IN[2].normalWS);
-
-                // dot = 1 → 동일 normal (smooth)
-                float threshold = 0.951057;
-
-                float d01 = dot(n0, n1);
-                float d12 = dot(n1, n2);
-                float d20 = dot(n2, n0);
-
-                VaryingsEdge A, B;
-
-                // v0 - v1
-                if (d01 < threshold)
-                {
-                    A = IN[0];
-                    B = IN[1];
-                    A.positionHCS = TransformWorldToHClip(A.posWS);
-                    B.positionHCS = TransformWorldToHClip(B.posWS);
-                    lineStream.Append(A);
-                    lineStream.Append(B);
-                }
-
-                // v1 - v2
-                if (d12 < threshold)
-                {
-                    A = IN[1];
-                    B = IN[2];
-                    A.positionHCS = TransformWorldToHClip(A.posWS);
-                    B.positionHCS = TransformWorldToHClip(B.posWS);
-                    lineStream.Append(A);
-                    lineStream.Append(B);
-                }
-
-                // v2 - v0
-                if (d20 < threshold)
-                {
-                    A = IN[2];
-                    B = IN[0];
-                    A.positionHCS = TransformWorldToHClip(A.posWS);
-                    B.positionHCS = TransformWorldToHClip(B.posWS);
-                    lineStream.Append(A);
-                    lineStream.Append(B);
-                }
-            }
-
-            float4 frag_edge(VaryingsEdge IN) : SV_Target
-            {
-                return _EdgeColor;
-            }
-
-            ENDHLSL
-        }
     }
 }
-
-

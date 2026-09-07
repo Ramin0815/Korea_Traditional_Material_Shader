@@ -1,0 +1,6 @@
+# Keep this repository focused on the edited shader sources.
+*
+!.gitignore
+!Gat.shader
+!modifyJagae.shader
+!GatGeometryBinder.cs
