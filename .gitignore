@@ -4,3 +4,11 @@
 !Gat.shader
 !modifyJagae.shader
 !GatGeometryBinder.cs
+!opengl/
+!opengl/**/
+!opengl/*.cpp
+!opengl/*.h
+!opengl/CMakeLists.txt
+!opengl/shaders/*.vert
+!opengl/shaders/*.frag
+!opengl/assets/UnityPostRamp.csv
